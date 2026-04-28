@@ -25,10 +25,11 @@ MIN_CELLS = 5
 MAX_CELLS = 200
 MAX_PHOTO_BYTES = 10 * 1024 * 1024   # 10 МБ
 
-ADAPTIVE_BLOCK_SIZE = 11
-ADAPTIVE_C = 2
-MORPH_KERNEL_SIZE = 3                # увеличено с 2 до 3 для лучшего закрытия дырок
-CLAHE_CLIP_LIMIT = 2.0
+# Улучшенные параметры обработки
+ADAPTIVE_BLOCK_SIZE = 9      # был 11, уменьшил для большей детализации
+ADAPTIVE_C = 5               # был 2, увеличил, чтобы порог был ниже (больше чёрного)
+MORPH_KERNEL_SIZE = 5        # был 3, увеличил для лучшего замыкания
+CLAHE_CLIP_LIMIT = 3.5       # был 2.0, сильнее повышает контраст
 CLAHE_TILE_SIZE = 8
 
 user_settings = {}
@@ -81,22 +82,30 @@ def send_menu_keyboard(chat_id, text):
     }
     return requests.post(url, json=payload)
 
-# ---------- Обработка изображения (оптимизированная) ----------
+# ---------- Обработка изображения (улучшенная чувствительность) ----------
 def process_image_to_matrix(image_bytes, target_cells):
     image = Image.open(io.BytesIO(image_bytes))
     img_cv = cv2.cvtColor(np.array(image), cv2.COLOR_RGB2BGR)
     gray = cv2.cvtColor(img_cv, cv2.COLOR_BGR2GRAY)
 
+    # CLAHE для повышения контраста
     clahe = cv2.createCLAHE(clipLimit=CLAHE_CLIP_LIMIT, tileGridSize=(CLAHE_TILE_SIZE, CLAHE_TILE_SIZE))
     gray = clahe.apply(gray)
 
+    # Адаптивная бинаризация (чувствительная)
     binary = cv2.adaptiveThreshold(gray, 255,
                                    cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
                                    cv2.THRESH_BINARY_INV,
                                    ADAPTIVE_BLOCK_SIZE, ADAPTIVE_C)
 
+    # Морфологическое замыкание для удаления дырок
     kernel = np.ones((MORPH_KERNEL_SIZE, MORPH_KERNEL_SIZE), np.uint8)
     cleaned = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, kernel)
+
+    # Убедимся, что очищенное изображение имеет чёткие границы
+    # Инвертируем, чтобы чёрные области были белыми (1 в матрице)
+    # THRESH_BINARY_INV уже даёт белые на тёмном, так что не нужно дополнительно инвертировать.
+    # Но для надёжности: если cleaned имеет 255 там, где были тёмные участки, то ок.
 
     h, w = cleaned.shape
     target_cols = max(MIN_CELLS, min(target_cells, MAX_CELLS))
@@ -105,17 +114,21 @@ def process_image_to_matrix(image_bytes, target_cells):
         target_rows = 200
         target_cols = int(target_rows * (w / h))
 
+    # Быстрое уменьшение (каждый пиксель = ячейка)
     small = cv2.resize(cleaned, (target_cols, target_rows), interpolation=cv2.INTER_AREA)
 
+    # Преобразуем в матрицу 0/1: 255 -> 1 (заполнено), 0 -> 0 (пусто)
     matrix = []
     for row in range(target_rows):
         row_str = ''.join('1' if small[row, col] == 255 else '0' for col in range(target_cols))
         matrix.append(row_str)
 
+    # Для PNG схемы используем small (уже бинарное)
+    # Но small имеет 0 и 255, для отображения как ч/б подходит
     scheme_pil = Image.fromarray(small, mode='L')
     return scheme_pil, matrix
 
-# ---------- Excel с полным форматированием (исправлено) ----------
+# ---------- Excel с полным форматированием ----------
 def generate_excel_bytes(matrix):
     wb = Workbook()
     ws = wb.active
@@ -130,19 +143,19 @@ def generate_excel_bytes(matrix):
     rows = len(matrix)
     cols = len(matrix[0]) if rows > 0 else 0
 
-    # Заголовки столбцов
+    # Заголовки столбцов (сверху)
     for col_idx in range(1, cols + 1):
         cell = ws.cell(row=1, column=col_idx + 1)
         cell.value = col_idx
         cell.alignment = center_align
 
-    # Заголовки строк
+    # Заголовки строк (слева)
     for row_idx in range(1, rows + 1):
         cell = ws.cell(row=row_idx + 1, column=1)
         cell.value = row_idx
         cell.alignment = center_align
 
-    # Заливка схемы
+    # Заполнение схемы
     for i, row_str in enumerate(matrix):
         for j, ch in enumerate(row_str):
             cell = ws.cell(row=i + 2, column=j + 2)
@@ -155,7 +168,7 @@ def generate_excel_bytes(matrix):
                 cell.fill = white_fill
                 cell.font = black_font
 
-    # Квадратные ячейки
+    # Настройка ширины и высоты для квадратных ячеек
     for col in range(2, cols + 2):
         ws.column_dimensions[get_column_letter(col)].width = 3
     for row in range(2, rows + 2):
@@ -166,7 +179,7 @@ def generate_excel_bytes(matrix):
     excel_buffer.seek(0)
     return excel_buffer
 
-# ---------- Текстовое описание (без изменений) ----------
+# ---------- Текстовое описание ----------
 def generate_description_txt(matrix):
     lines = []
     for idx, row_str in enumerate(matrix, start=1):
@@ -248,11 +261,11 @@ def webhook():
             send_menu_keyboard(chat_id, help_text)
             return jsonify({'status': 'ok'})
 
-        # Если нет фото
+        # Если нет фото, игнорируем
         if 'photo' not in message:
             return jsonify({'status': 'ok'})
 
-        # Проверка размера
+        # Проверка размера фото
         photo_obj = message['photo'][-1]
         if photo_obj.get('file_size', 0) > MAX_PHOTO_BYTES:
             send_message(chat_id, "❌ Фото слишком большое (больше 10 МБ). Пожалуйста, отправьте изображение меньшего размера.")
@@ -269,20 +282,20 @@ def webhook():
         file_path = file_info['result']['file_path']
         photo_bytes = requests.get(f"https://api.telegram.org/file/bot{TOKEN}/{file_path}").content
 
-        # Генерация
+        # Генерация схемы
         scheme_image, matrix = process_image_to_matrix(photo_bytes, target_cells)
 
-        # PNG
+        # PNG схема
         png_buffer = io.BytesIO()
         scheme_image.save(png_buffer, format='PNG', optimize=True)
         png_buffer.seek(0)
         send_photo(chat_id, png_buffer, f"📐 Схема (ширина {len(matrix[0])} ячеек, высота {len(matrix)})")
 
-        # Excel (теперь с заливкой)
+        # Excel
         excel_buffer = generate_excel_bytes(matrix)
         send_document(chat_id, excel_buffer, "scheme.xlsx", "📊 Excel-схема: 0=белый, 1=чёрный")
 
-        # Текст
+        # Текстовое описание
         description = generate_description_txt(matrix)
         txt_buffer = io.BytesIO(description.encode('utf-8'))
         txt_buffer.seek(0)
@@ -291,7 +304,6 @@ def webhook():
         return jsonify({'status': 'ok'})
     except Exception as e:
         logging.error(f"Ошибка в вебхуке: {e}", exc_info=True)
-        # Безопасно отправляем сообщение об ошибке (если chat_id существует)
         try:
             if 'chat_id' in locals():
                 send_message(chat_id, "❌ Произошла ошибка при обработке. Попробуйте другое фото или размер.")

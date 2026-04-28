@@ -1,0 +1,7 @@
+flask
+python-telegram-bot
+opencv-python-headless
+pillow
+numpy
+requests
+gunicorn

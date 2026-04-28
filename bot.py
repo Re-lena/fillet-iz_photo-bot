@@ -10,29 +10,25 @@ import os
 logging.basicConfig(level=logging.INFO)
 
 # Берём токен из переменной окружения (безопасно)
-TOKEN = os.environ.get('8444213096:AAHsaf5Rr7lUOVguOmh4Oi8MyJ9rw31qIFU')
+TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN')
 if not TOKEN:
-    raise ValueError("No 8444213096:AAHsaf5Rr7lUOVguOmh4Oi8MyJ9rw31qIFU set")
+    raise ValueError("Переменная окружения TELEGRAM_BOT_TOKEN не установлена!")
 
 bot = Bot(token=TOKEN)
 app = Flask(__name__)
 
 def process_image_to_knitting_scheme(image_bytes):
-    # Загружаем изображение
     image = Image.open(io.BytesIO(image_bytes))
     img_cv = cv2.cvtColor(np.array(image), cv2.COLOR_RGB2BGR)
     gray = cv2.cvtColor(img_cv, cv2.COLOR_BGR2GRAY)
 
-    # Адаптивная бинаризация
     binary = cv2.adaptiveThreshold(gray, 255,
                                    cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
                                    cv2.THRESH_BINARY_INV, 11, 2)
 
-    # Удаление шума
     kernel = np.ones((2, 2), np.uint8)
     cleaned = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, kernel)
 
-    # Размер ячейки (можно позже сделать настраиваемым)
     cell_size = 15
     height, width = cleaned.shape
     rows = height // cell_size
@@ -49,15 +45,13 @@ def process_image_to_knitting_scheme(image_bytes):
             if filled_ratio > 0.5:
                 scheme[y, x] = 255
 
-    scheme_pil = Image.fromarray(scheme, mode='L')
-    return scheme_pil
+    return Image.fromarray(scheme, mode='L')
 
 @app.route('/webhook', methods=['POST'])
 def webhook():
     try:
         update = Update.de_json(request.get_json(force=True), bot)
         if update.message and update.message.photo:
-            # Берём фото в максимальном качестве
             photo_file = update.message.photo[-1].get_file()
             file_bytes = photo_file.download_as_bytearray()
             scheme_image = process_image_to_knitting_scheme(file_bytes)

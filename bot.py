@@ -8,6 +8,7 @@ import os
 import requests
 from openpyxl import Workbook
 from openpyxl.styles import PatternFill, Alignment, Font
+from openpyxl.utils import get_column_letter
 
 logging.basicConfig(level=logging.INFO)
 
@@ -17,11 +18,15 @@ if not TOKEN:
 
 app = Flask(__name__)
 
-# Хранилище настроек пользователей: {chat_id: cell_size}
+# Хранилище настроек пользователей: {chat_id: target_cells}
 user_settings = {}
+DEFAULT_CELLS = 50
 
-def process_image_to_matrix(image_bytes, cell_size):
-    """Возвращает (PIL Image схемы, матрица 0/1 в виде списка строк)"""
+def process_image_to_matrix(image_bytes, target_cells):
+    """
+    Преобразует фото в бинарную матрицу с размером примерно target_cells по ширине.
+    Возвращает (PIL Image схемы, матрица 0/1 в виде списка строк).
+    """
     image = Image.open(io.BytesIO(image_bytes))
     img_cv = cv2.cvtColor(np.array(image), cv2.COLOR_RGB2BGR)
     gray = cv2.cvtColor(img_cv, cv2.COLOR_BGR2GRAY)
@@ -33,28 +38,35 @@ def process_image_to_matrix(image_bytes, cell_size):
     kernel = np.ones((2, 2), np.uint8)
     cleaned = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, kernel)
 
-    height, width = cleaned.shape
-    rows = height // cell_size
-    cols = width // cell_size
-    if rows == 0 or cols == 0:
-        raise ValueError("Изображение слишком маленькое для выбранного размера ячейки")
+    h, w = cleaned.shape
+    target_cols = target_cells
+    target_rows = max(1, int(target_cols * (h / w)))
+    # Ограничим, чтобы схема не была слишком высокой (опционально)
+    if target_rows > 200:
+        target_rows = 200
+        target_cols = int(target_rows * (w / h))
 
-    matrix = []  # список строк из '0'/'1'
-    scheme = np.zeros((rows, cols), dtype=np.uint8)
+    matrix = []
+    scheme = np.zeros((target_rows, target_cols), dtype=np.uint8)
 
-    for y in range(rows):
-        row_str_list = []
-        for x in range(cols):
-            start_y = y * cell_size
-            start_x = x * cell_size
-            cell = cleaned[start_y:start_y + cell_size, start_x:start_x + cell_size]
-            filled_ratio = np.sum(cell == 255) / (cell_size * cell_size)
-            if filled_ratio > 0.5:
-                scheme[y, x] = 255
-                row_str_list.append('1')
+    for row in range(target_rows):
+        row_str = []
+        y_start = int(row * h / target_rows)
+        y_end = int((row + 1) * h / target_rows)
+        for col in range(target_cols):
+            x_start = int(col * w / target_cols)
+            x_end = int((col + 1) * w / target_cols)
+            block = cleaned[y_start:y_end, x_start:x_end]
+            if block.size == 0:
+                filled_ratio = 0
             else:
-                row_str_list.append('0')
-        matrix.append(''.join(row_str_list))
+                filled_ratio = np.sum(block == 255) / block.size
+            if filled_ratio > 0.5:
+                scheme[row, col] = 255
+                row_str.append('1')
+            else:
+                row_str.append('0')
+        matrix.append(''.join(row_str))
 
     scheme_pil = Image.fromarray(scheme, mode='L')
     return scheme_pil, matrix
@@ -65,17 +77,16 @@ def generate_excel_bytes(matrix):
     ws = wb.active
     ws.title = "Scheme"
 
-    # Заливки
     black_fill = PatternFill(start_color="000000", end_color="000000", fill_type="solid")
     white_fill = PatternFill(start_color="FFFFFF", end_color="FFFFFF", fill_type="solid")
 
-    # Заголовки столбцов (номера столбцов) – в первой строке, начиная с B1
+    # Заголовки столбцов
     for col_idx in range(1, len(matrix[0]) + 1):
-        cell = ws.cell(row=1, column=col_idx + 1)  # +1 из-за первого столбца с номерами строк
+        cell = ws.cell(row=1, column=col_idx + 1)
         cell.value = col_idx
         cell.alignment = Alignment(horizontal="center", vertical="center")
 
-    # Номера строк (в первом столбце, начиная со второй строки)
+    # Номера строк
     for row_idx in range(1, len(matrix) + 1):
         cell = ws.cell(row=row_idx + 1, column=1)
         cell.value = row_idx
@@ -84,18 +95,16 @@ def generate_excel_bytes(matrix):
     # Заполнение схемы
     for i, row_str in enumerate(matrix):
         for j, ch in enumerate(row_str):
-            cell = ws.cell(row=i + 2, column=j + 2)  # +2 из-за заголовков
+            cell = ws.cell(row=i + 2, column=j + 2)
             cell.value = int(ch)
             cell.alignment = Alignment(horizontal="center", vertical="center")
             if ch == '1':
                 cell.fill = black_fill
-                cell.font = Font(color="FFFFFF")  # белый текст на чёрном
+                cell.font = Font(color="FFFFFF")
             else:
                 cell.fill = white_fill
-                cell.font = Font(color="000000")  # чёрный текст на белом
+                cell.font = Font(color="000000")
 
-    # Настройка ширины столбцов и высоты строк для квадратных ячеек
-    from openpyxl.utils import get_column_letter
     for col in range(2, len(matrix[0]) + 2):
         ws.column_dimensions[get_column_letter(col)].width = 3
     for row in range(2, len(matrix) + 2):
@@ -107,7 +116,6 @@ def generate_excel_bytes(matrix):
     return excel_buffer
 
 def generate_description_txt(matrix):
-    """Генерирует текстовое описание в виде группировок: '12 пустых, 7 заполненных, 9 пустых'"""
     lines = []
     for idx, row_str in enumerate(matrix, start=1):
         if not row_str:
@@ -158,20 +166,52 @@ def webhook():
         text = message.get('text', '')
 
         # Обработка команд
-        if text.startswith('/size'):
+        if text.startswith('/big'):
+            user_settings[chat_id] = 50
+            send_message(chat_id, "✅ Установлен большой размер схемы (~50 ячеек по ширине).")
+            return jsonify({'status': 'ok'})
+
+        if text.startswith('/medium'):
+            user_settings[chat_id] = 25
+            send_message(chat_id, "✅ Установлен средний размер схемы (~25 ячеек по ширине).")
+            return jsonify({'status': 'ok'})
+
+        if text.startswith('/small'):
+            user_settings[chat_id] = 15
+            send_message(chat_id, "✅ Установлен маленький размер схемы (~15 ячеек по ширине).")
+            return jsonify({'status': 'ok'})
+
+        if text.startswith('/cells'):
             parts = text.split()
             if len(parts) == 2:
                 try:
-                    new_size = int(parts[1])
-                    if 5 <= new_size <= 50:
-                        user_settings[chat_id] = new_size
-                        send_message(chat_id, f"✅ Размер ячейки установлен на {new_size} пикселей.")
+                    val = int(parts[1])
+                    if 5 <= val <= 200:
+                        user_settings[chat_id] = val
+                        send_message(chat_id, f"✅ Количество ячеек по ширине установлено: {val}.")
                     else:
-                        send_message(chat_id, "❌ Размер ячейки должен быть от 5 до 50.")
-                except ValueError:
-                    send_message(chat_id, "❌ Используйте: /size <число от 5 до 50>")
+                        send_message(chat_id, "❌ Введите число от 5 до 200.")
+                except:
+                    send_message(chat_id, "❌ Используйте: /cells <число>")
             else:
-                send_message(chat_id, "❌ Пример: /size 20")
+                send_message(chat_id, "❌ Пример: /cells 30")
+            return jsonify({'status': 'ok'})
+
+        if text.startswith('/size'):
+            # Оставляем для обратной совместимости, но теперь лучше использовать /cells
+            parts = text.split()
+            if len(parts) == 2:
+                try:
+                    val = int(parts[1])
+                    if 5 <= val <= 200:
+                        user_settings[chat_id] = val
+                        send_message(chat_id, f"✅ Количество ячеек установлено: {val} (старая команда /size, используйте /cells).")
+                    else:
+                        send_message(chat_id, "❌ Введите число от 5 до 200.")
+                except:
+                    send_message(chat_id, "❌ Используйте: /size <число>")
+            else:
+                send_message(chat_id, "❌ Пример: /size 30")
             return jsonify({'status': 'ok'})
 
         if text.startswith('/start') or text.startswith('/help'):
@@ -179,9 +219,12 @@ def webhook():
                 "🧶 Бот для филейного вязания\n\n"
                 "📸 Отправьте фото, и я превращу его в схему.\n"
                 "⚙️ Команды:\n"
-                "/size N — установить размер ячейки (5-50), по умолчанию 15\n"
+                "/big — большая схема (~50 ячеек по ширине)\n"
+                "/medium — средняя (~25 ячеек)\n"
+                "/small — маленькая (~15 ячеек)\n"
+                "/cells N — задать число ячеек по ширине вручную (5-200)\n"
                 "/help — эта справка\n\n"
-                "Результат: PNG схема, Excel файл (визуальная схема с чёрными клетками для 1), текстовое описание рядами."
+                "Результат: PNG схема, Excel (чёрные клетки для 1), текстовое описание."
             )
             send_message(chat_id, help_text)
             return jsonify({'status': 'ok'})
@@ -190,8 +233,7 @@ def webhook():
         if 'photo' not in message:
             return jsonify({'status': 'ok'})
 
-        # Получаем размер ячейки для данного чата (по умолчанию 15)
-        cell_size = user_settings.get(chat_id, 15)
+        target_cells = user_settings.get(chat_id, DEFAULT_CELLS)
 
         # Скачиваем фото
         photo_obj = message['photo'][-1]
@@ -204,19 +246,19 @@ def webhook():
         photo_bytes = requests.get(f"https://api.telegram.org/file/bot{TOKEN}/{file_path}").content
 
         # Обработка
-        scheme_image, matrix = process_image_to_matrix(photo_bytes, cell_size)
+        scheme_image, matrix = process_image_to_matrix(photo_bytes, target_cells)
 
         # PNG схема
         png_buffer = io.BytesIO()
         scheme_image.save(png_buffer, format='PNG')
         png_buffer.seek(0)
-        send_photo(chat_id, png_buffer, f"📐 Схема (ячейка {cell_size} px)")
+        send_photo(chat_id, png_buffer, f"📐 Схема (ширина {len(matrix[0])} ячеек, высота {len(matrix)})")
 
-        # Excel файл (визуальная схема с номерами строк/столбцов)
+        # Excel файл
         excel_buffer = generate_excel_bytes(matrix)
         send_document(chat_id, excel_buffer, "scheme.xlsx", "📊 Excel-схема: 0=белый, 1=чёрный")
 
-        # Текстовое описание (группировки)
+        # Текстовое описание
         description = generate_description_txt(matrix)
         txt_buffer = io.BytesIO(description.encode('utf-8'))
         txt_buffer.seek(0)

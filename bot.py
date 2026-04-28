@@ -1,11 +1,12 @@
 import logging
 from flask import Flask, request, jsonify
-from telegram import Bot, Update
 import cv2
 import numpy as np
 from PIL import Image
 import io
 import os
+import requests
+import json
 
 logging.basicConfig(level=logging.INFO)
 
@@ -13,7 +14,6 @@ TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN')
 if not TOKEN:
     raise ValueError("Переменная окружения TELEGRAM_BOT_TOKEN не установлена!")
 
-bot = Bot(token=TOKEN)
 app = Flask(__name__)
 
 def process_image_to_knitting_scheme(image_bytes):
@@ -46,22 +46,50 @@ def process_image_to_knitting_scheme(image_bytes):
 
     return Image.fromarray(scheme, mode='L')
 
+def send_photo(chat_id, photo_bytes, caption=""):
+    url = f"https://api.telegram.org/bot{TOKEN}/sendPhoto"
+    files = {'photo': photo_bytes}
+    data = {'chat_id': chat_id, 'caption': caption}
+    response = requests.post(url, files=files, data=data)
+    return response.ok
+
 @app.route('/webhook', methods=['POST'])
 def webhook():
     try:
-        update = Update.de_json(request.get_json(force=True), bot)
-        if update.message and update.message.photo:
-            file_id = update.message.photo[-1].file_id
-            file_obj = bot.get_file(file_id)
-            file_bytes = file_obj.download_as_bytearray()
-            scheme_image = process_image_to_knitting_scheme(file_bytes)
-            output_buffer = io.BytesIO()
-            scheme_image.save(output_buffer, format='PNG')
-            output_buffer.seek(0)
-            update.message.reply_photo(
-                photo=output_buffer,
-                caption="✅ Ваша схема готова! 1 клетка = 3 столбика с накидом."
-            )
+        update = request.get_json()
+        if not update or 'message' not in update:
+            return jsonify({'status': 'ok'})
+
+        message = update['message']
+        chat_id = message['chat']['id']
+
+        # Проверяем, есть ли фото
+        if 'photo' not in message:
+            return jsonify({'status': 'ok'})
+
+        # Берём самый большой размер фото (последний элемент)
+        photo_obj = message['photo'][-1]
+        file_id = photo_obj['file_id']
+
+        # Получаем ссылку на файл
+        file_url = f"https://api.telegram.org/bot{TOKEN}/getFile?file_id={file_id}"
+        file_resp = requests.get(file_url).json()
+        if not file_resp['ok']:
+            raise Exception("Не удалось получить информацию о файле")
+
+        file_path = file_resp['result']['file_path']
+        file_download_url = f"https://api.telegram.org/file/bot{TOKEN}/{file_path}"
+        photo_bytes = requests.get(file_download_url).content
+
+        # Обрабатываем в схему
+        scheme_image = process_image_to_knitting_scheme(photo_bytes)
+        output_buffer = io.BytesIO()
+        scheme_image.save(output_buffer, format='PNG')
+        output_buffer.seek(0)
+
+        # Отправляем схему
+        send_photo(chat_id, output_buffer, "✅ Ваша схема готова! 1 клетка = 3 столбика с накидом.")
+
         return jsonify({'status': 'ok'})
     except Exception as e:
         logging.error(f"Ошибка: {e}")

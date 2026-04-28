@@ -23,49 +23,43 @@ DEFAULT_CELLS = 50
 
 def process_image_to_matrix(image_bytes, target_cells):
     """
-    Улучшенная версия: сначала ресайзим изображение до целевого размера (ширина = target_cells),
-    затем бинаризуем. Это сохраняет детали при сильном сжатии.
+    Стабильная версия: бинаризация, затем разбиение на блоки с усреднением.
     """
-    # Загружаем изображение
     image = Image.open(io.BytesIO(image_bytes))
-    # Конвертируем в RGB (OpenCV)
     img_cv = cv2.cvtColor(np.array(image), cv2.COLOR_RGB2BGR)
     gray = cv2.cvtColor(img_cv, cv2.COLOR_BGR2GRAY)
 
-    # Повышаем контраст (CLAHE) для лучшего разделения
-    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8,8))
-    gray = clahe.apply(gray)
+    binary = cv2.adaptiveThreshold(gray, 255,
+                                   cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+                                   cv2.THRESH_BINARY_INV, 11, 2)
 
-    # Определяем целевой размер (ширина = target_cells, высота пропорционально)
-    h, w = gray.shape
+    kernel = np.ones((2, 2), np.uint8)
+    cleaned = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, kernel)
+
+    h, w = cleaned.shape
     target_cols = target_cells
     target_rows = max(1, int(target_cols * (h / w)))
-    # Ограничим, чтобы не было слишком много строк (опционально)
     if target_rows > 200:
         target_rows = 200
         target_cols = int(target_rows * (w / h))
 
-    # Ресайзим до целевого размера с интерполяцией INTER_AREA (лучше для уменьшения)
-    resized = cv2.resize(gray, (target_cols, target_rows), interpolation=cv2.INTER_AREA)
-
-    # Теперь бинаризуем уменьшенное изображение (адаптивный порог)
-    binary = cv2.adaptiveThreshold(resized, 255,
-                                   cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
-                                   cv2.THRESH_BINARY_INV, 11, 2)
-
-    # Морфология для удаления шума (опционально, на маленьком размере может быть не нужно)
-    kernel = np.ones((2, 2), np.uint8)
-    cleaned = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, kernel)
-
-    # Преобразуем в матрицу 0/1 (уже попиксельно, так как размер совпадает)
     matrix = []
     scheme = np.zeros((target_rows, target_cols), dtype=np.uint8)
 
-    for y in range(target_rows):
+    for row in range(target_rows):
         row_str = []
-        for x in range(target_cols):
-            if cleaned[y, x] == 255:
-                scheme[y, x] = 255
+        y_start = int(row * h / target_rows)
+        y_end = int((row + 1) * h / target_rows)
+        for col in range(target_cols):
+            x_start = int(col * w / target_cols)
+            x_end = int((col + 1) * w / target_cols)
+            block = cleaned[y_start:y_end, x_start:x_end]
+            if block.size == 0:
+                filled_ratio = 0
+            else:
+                filled_ratio = np.sum(block == 255) / block.size
+            if filled_ratio > 0.5:
+                scheme[row, col] = 255
                 row_str.append('1')
             else:
                 row_str.append('0')
@@ -75,27 +69,21 @@ def process_image_to_matrix(image_bytes, target_cells):
     return scheme_pil, matrix
 
 def generate_excel_bytes(matrix):
-    """Создаёт Excel-файл с визуальной схемой (чёрные клетки для 1)"""
     wb = Workbook()
     ws = wb.active
     ws.title = "Scheme"
-
     black_fill = PatternFill(start_color="000000", end_color="000000", fill_type="solid")
     white_fill = PatternFill(start_color="FFFFFF", end_color="FFFFFF", fill_type="solid")
 
-    # Заголовки столбцов
     for col_idx in range(1, len(matrix[0]) + 1):
         cell = ws.cell(row=1, column=col_idx + 1)
         cell.value = col_idx
         cell.alignment = Alignment(horizontal="center", vertical="center")
-
-    # Номера строк
     for row_idx in range(1, len(matrix) + 1):
         cell = ws.cell(row=row_idx + 1, column=1)
         cell.value = row_idx
         cell.alignment = Alignment(horizontal="center", vertical="center")
 
-    # Заполнение
     for i, row_str in enumerate(matrix):
         for j, ch in enumerate(row_str):
             cell = ws.cell(row=i + 2, column=j + 2)
@@ -186,7 +174,6 @@ def webhook():
         chat_id = message['chat']['id']
         text = message.get('text', '')
 
-        # Преобразование кнопок
         if text == "🐭 Маленький":
             text = "/small"
         elif text == "🐰 Средний":
@@ -198,7 +185,6 @@ def webhook():
         elif text == "❓ Помощь":
             text = "/help"
 
-        # Команды
         if text.startswith('/big'):
             user_settings[chat_id] = 50
             send_message(chat_id, "✅ Установлен большой размер схемы (~50 ячеек по ширине).")
@@ -230,34 +216,16 @@ def webhook():
                 send_message(chat_id, "Введите количество ячеек по ширине числом от 5 до 200. Например: /cells 30")
             return jsonify({'status': 'ok'})
 
-        if text.startswith('/size'):  # старая команда для совместимости
-            parts = text.split()
-            if len(parts) == 2:
-                try:
-                    val = int(parts[1])
-                    if 5 <= val <= 200:
-                        user_settings[chat_id] = val
-                        send_message(chat_id, f"✅ Количество ячеек установлено: {val} (старая команда /size).")
-                    else:
-                        send_message(chat_id, "❌ Введите число от 5 до 200.")
-                except:
-                    send_message(chat_id, "❌ Используйте: /size <число>")
-            else:
-                send_message(chat_id, "❌ Пример: /size 30")
-            return jsonify({'status': 'ok'})
-
         if text.startswith('/start') or text.startswith('/help'):
             help_text = "🧶 Выберите размер будущего изделия:"
             send_menu_keyboard(chat_id, help_text)
             return jsonify({'status': 'ok'})
 
-        # Обработка фото
         if 'photo' not in message:
             return jsonify({'status': 'ok'})
 
         target_cells = user_settings.get(chat_id, DEFAULT_CELLS)
 
-        # Скачиваем фото
         photo_obj = message['photo'][-1]
         file_id = photo_obj['file_id']
         file_info = requests.get(f"https://api.telegram.org/bot{TOKEN}/getFile?file_id={file_id}").json()
@@ -267,20 +235,16 @@ def webhook():
         file_path = file_info['result']['file_path']
         photo_bytes = requests.get(f"https://api.telegram.org/file/bot{TOKEN}/{file_path}").content
 
-        # Генерируем схему
         scheme_image, matrix = process_image_to_matrix(photo_bytes, target_cells)
 
-        # PNG схема
         png_buffer = io.BytesIO()
         scheme_image.save(png_buffer, format='PNG')
         png_buffer.seek(0)
         send_photo(chat_id, png_buffer, f"📐 Схема (ширина {len(matrix[0])} ячеек, высота {len(matrix)})")
 
-        # Excel
         excel_buffer = generate_excel_bytes(matrix)
         send_document(chat_id, excel_buffer, "scheme.xlsx", "📊 Excel-схема: 0=белый, 1=чёрный")
 
-        # Текстовое описание
         description = generate_description_txt(matrix)
         txt_buffer = io.BytesIO(description.encode('utf-8'))
         txt_buffer.seek(0)

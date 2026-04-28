@@ -21,59 +21,31 @@ app = Flask(__name__)
 user_settings = {}
 DEFAULT_CELLS = 50
 
-def cartoonize(img_cv):
-    """
-    Превращает обычное фото в стикер-подобное изображение:
-    - сглаживает цвета (билатеральный фильтр)
-    - выделяет чёрные контуры
-    """
-    # Сглаживание (убирает шум, но сохраняет границы)
-    smooth = cv2.bilateralFilter(img_cv, 9, 75, 75)
-    
-    # Конвертируем в чёрно-белое для контуров
-    gray = cv2.cvtColor(smooth, cv2.COLOR_BGR2GRAY)
-    
-    # Выделяем края (Canny)
-    edges = cv2.Canny(gray, 100, 200)
-    
-    # Инвертируем края (чтобы они стали чёрными)
-    edges_inv = cv2.bitwise_not(edges)
-    
-    # Наложим края на сглаженное изображение (делает контуры чёрными)
-    # Сначала сделаем сглаженное изображение чёрно-белым
-    gray_smooth = cv2.cvtColor(smooth, cv2.COLOR_BGR2GRAY)
-    # Делаем контуры чёрными, а остальное белым (подходит для дальнейшей бинаризации)
-    cartoon = cv2.bitwise_and(gray_smooth, gray_smooth, mask=edges)
-    # Усиливаем контуры и заполняем фон
-    _, cartoon_binary = cv2.threshold(cartoon, 50, 255, cv2.THRESH_BINARY_INV)
-    
-    return cartoon_binary
-
 def process_image_to_matrix(image_bytes, target_cells):
     """
-    Превращает фото в схему:
-    - сначала преобразует в стикер (cartoonize)
-    - затем бинаризирует и разбивает на ячейки
+    Преобразует фото в бинарную матрицу с размером примерно target_cells по ширине.
     """
-    # Загружаем изображение
     image = Image.open(io.BytesIO(image_bytes))
     img_cv = cv2.cvtColor(np.array(image), cv2.COLOR_RGB2BGR)
-    
-    # Шаг 1: превращаем в стикер
-    cartoon = cartoonize(img_cv)
-    
-    # Теперь cartoon — это чёрно-белое изображение, готовое к бинаризации и разбиению на ячейки
-    h, w = cartoon.shape
+    gray = cv2.cvtColor(img_cv, cv2.COLOR_BGR2GRAY)
+
+    binary = cv2.adaptiveThreshold(gray, 255,
+                                   cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+                                   cv2.THRESH_BINARY_INV, 11, 2)
+
+    kernel = np.ones((2, 2), np.uint8)
+    cleaned = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, kernel)
+
+    h, w = cleaned.shape
     target_cols = target_cells
     target_rows = max(1, int(target_cols * (h / w)))
     if target_rows > 200:
         target_rows = 200
         target_cols = int(target_rows * (w / h))
-    
-    # Разбиваем на ячейки (как и раньше)
+
     matrix = []
     scheme = np.zeros((target_rows, target_cols), dtype=np.uint8)
-    
+
     for row in range(target_rows):
         row_str = []
         y_start = int(row * h / target_rows)
@@ -81,7 +53,7 @@ def process_image_to_matrix(image_bytes, target_cells):
         for col in range(target_cols):
             x_start = int(col * w / target_cols)
             x_end = int((col + 1) * w / target_cols)
-            block = cartoon[y_start:y_end, x_start:x_end]
+            block = cleaned[y_start:y_end, x_start:x_end]
             if block.size == 0:
                 filled_ratio = 0
             else:
@@ -92,16 +64,9 @@ def process_image_to_matrix(image_bytes, target_cells):
             else:
                 row_str.append('0')
         matrix.append(''.join(row_str))
-    
+
     scheme_pil = Image.fromarray(scheme, mode='L')
     return scheme_pil, matrix
-
-# Остальные функции (generate_excel_bytes, generate_description_txt, send_*, webhook и т.д.)
-# полностью такие же, как в предыдущей стабильной версии (я их копирую из последнего рабочего кода)
-
-# —————— ВСТАВЬТЕ СЮДА ВСЕ ОСТАЛЬНЫЕ ФУНКЦИИ (generate_excel_bytes, generate_description_txt, send_document, send_photo, send_message, send_menu_keyboard) ————
-
-# ========= НАЧАЛО ВСТАВКИ остального кода =========
 
 def generate_excel_bytes(matrix):
     wb = Workbook()
@@ -198,8 +163,6 @@ def send_menu_keyboard(chat_id, text):
     }
     requests.post(url, json=payload)
 
-# ========= КОНЕЦ ВСТАВКИ =========
-
 @app.route('/webhook', methods=['POST'])
 def webhook():
     try:
@@ -276,7 +239,7 @@ def webhook():
         file_path = file_info['result']['file_path']
         photo_bytes = requests.get(f"https://api.telegram.org/file/bot{TOKEN}/{file_path}").content
 
-        # Генерируем схему (с включённым стикер-эффектом)
+        # Генерируем схему (без стикер-эффекта)
         scheme_image, matrix = process_image_to_matrix(photo_bytes, target_cells)
 
         # PNG

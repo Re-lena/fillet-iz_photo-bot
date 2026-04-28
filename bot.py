@@ -6,7 +6,6 @@ import numpy as np
 from PIL import Image
 import io
 import os
-import requests
 
 logging.basicConfig(level=logging.INFO)
 
@@ -52,14 +51,9 @@ def webhook():
     try:
         update = Update.de_json(request.get_json(force=True), bot)
         if update.message and update.message.photo:
-            # Получаем file_id самого большого фото
             file_id = update.message.photo[-1].file_id
-            # Синхронно получаем объект файла
             file_obj = bot.get_file(file_id)
-            # Скачиваем содержимое через requests
-            file_response = requests.get(file_obj.file_path)
-            file_bytes = file_response.content
-            # Обрабатываем схему
+            file_bytes = file_obj.download_as_bytearray()
             scheme_image = process_image_to_knitting_scheme(file_bytes)
             output_buffer = io.BytesIO()
             scheme_image.save(output_buffer, format='PNG')

@@ -6,8 +6,8 @@ from PIL import Image
 import io
 import os
 import requests
-import re
 from openpyxl import Workbook
+from openpyxl.styles import PatternFill, Alignment, Font
 
 logging.basicConfig(level=logging.INFO)
 
@@ -60,15 +60,47 @@ def process_image_to_matrix(image_bytes, cell_size):
     return scheme_pil, matrix
 
 def generate_excel_bytes(matrix):
-    """Создаёт Excel-файл с матрицей (первый лист) и возвращает BytesIO"""
+    """Создаёт Excel-файл с визуальной схемой (чёрные клетки для 1) и возвращает BytesIO"""
     wb = Workbook()
     ws = wb.active
     ws.title = "Scheme"
-    # Записываем по строкам, каждая ячейка - символ '0' или '1' (можно как число, но лучше строка)
-    for i, row_str in enumerate(matrix, start=1):
-        for j, ch in enumerate(row_str, start=1):
-            ws.cell(row=i, column=j, value=int(ch))
-    # Сохраняем в BytesIO
+
+    # Заливки
+    black_fill = PatternFill(start_color="000000", end_color="000000", fill_type="solid")
+    white_fill = PatternFill(start_color="FFFFFF", end_color="FFFFFF", fill_type="solid")
+
+    # Заголовки столбцов (номера столбцов) – в первой строке, начиная с B1
+    for col_idx in range(1, len(matrix[0]) + 1):
+        cell = ws.cell(row=1, column=col_idx + 1)  # +1 из-за первого столбца с номерами строк
+        cell.value = col_idx
+        cell.alignment = Alignment(horizontal="center", vertical="center")
+
+    # Номера строк (в первом столбце, начиная со второй строки)
+    for row_idx in range(1, len(matrix) + 1):
+        cell = ws.cell(row=row_idx + 1, column=1)
+        cell.value = row_idx
+        cell.alignment = Alignment(horizontal="center", vertical="center")
+
+    # Заполнение схемы
+    for i, row_str in enumerate(matrix):
+        for j, ch in enumerate(row_str):
+            cell = ws.cell(row=i + 2, column=j + 2)  # +2 из-за заголовков
+            cell.value = int(ch)
+            cell.alignment = Alignment(horizontal="center", vertical="center")
+            if ch == '1':
+                cell.fill = black_fill
+                cell.font = Font(color="FFFFFF")  # белый текст на чёрном
+            else:
+                cell.fill = white_fill
+                cell.font = Font(color="000000")  # чёрный текст на белом
+
+    # Настройка ширины столбцов и высоты строк для квадратных ячеек
+    from openpyxl.utils import get_column_letter
+    for col in range(2, len(matrix[0]) + 2):
+        ws.column_dimensions[get_column_letter(col)].width = 3
+    for row in range(2, len(matrix) + 2):
+        ws.row_dimensions[row].height = 15
+
     excel_buffer = io.BytesIO()
     wb.save(excel_buffer)
     excel_buffer.seek(0)
@@ -88,7 +120,6 @@ def generate_description_txt(matrix):
             if ch == current:
                 count += 1
             else:
-                # current '0' -> пустых, '1' -> заполненных
                 groups.append(f"{count} {'пустых' if current == '0' else 'заполненных'}")
                 current = ch
                 count = 1
@@ -150,7 +181,7 @@ def webhook():
                 "⚙️ Команды:\n"
                 "/size N — установить размер ячейки (5-50), по умолчанию 15\n"
                 "/help — эта справка\n\n"
-                "Результат: PNG схема, Excel файл (матрица 0/1), текстовое описание рядами."
+                "Результат: PNG схема, Excel файл (визуальная схема с чёрными клетками для 1), текстовое описание рядами."
             )
             send_message(chat_id, help_text)
             return jsonify({'status': 'ok'})
@@ -181,9 +212,9 @@ def webhook():
         png_buffer.seek(0)
         send_photo(chat_id, png_buffer, f"📐 Схема (ячейка {cell_size} px)")
 
-        # Excel файл
+        # Excel файл (визуальная схема с номерами строк/столбцов)
         excel_buffer = generate_excel_bytes(matrix)
-        send_document(chat_id, excel_buffer, "scheme.xlsx", "📊 Excel-матрица (0/1)")
+        send_document(chat_id, excel_buffer, "scheme.xlsx", "📊 Excel-схема: 0=белый, 1=чёрный")
 
         # Текстовое описание (группировки)
         description = generate_description_txt(matrix)

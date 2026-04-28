@@ -154,6 +154,25 @@ def send_message(chat_id, text):
     payload = {'chat_id': chat_id, 'text': text}
     requests.post(url, json=payload)
 
+def send_menu_keyboard(chat_id, text):
+    """Отправляет сообщение с клавиатурой выбора размера"""
+    url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
+    keyboard = {
+        "keyboard": [
+            ["🐭 Маленький", "🐰 Средний"],
+            ["🐘 Большой", "📏 Свой размер"],
+            ["❓ Помощь"]
+        ],
+        "resize_keyboard": True,
+        "one_time_keyboard": False
+    }
+    payload = {
+        'chat_id': chat_id,
+        'text': text,
+        'reply_markup': keyboard
+    }
+    requests.post(url, json=payload)
+
 @app.route('/webhook', methods=['POST'])
 def webhook():
     try:
@@ -164,6 +183,18 @@ def webhook():
         message = update['message']
         chat_id = message['chat']['id']
         text = message.get('text', '')
+
+        # Преобразование нажатий кнопок в команды
+        if text == "🐭 Маленький":
+            text = "/small"
+        elif text == "🐰 Средний":
+            text = "/medium"
+        elif text == "🐘 Большой":
+            text = "/big"
+        elif text == "📏 Свой размер":
+            text = "/cells"
+        elif text == "❓ Помощь":
+            text = "/help"
 
         # Обработка команд
         if text.startswith('/big'):
@@ -194,11 +225,11 @@ def webhook():
                 except:
                     send_message(chat_id, "❌ Используйте: /cells <число>")
             else:
-                send_message(chat_id, "❌ Пример: /cells 30")
+                send_message(chat_id, "Введите количество ячеек по ширине числом от 5 до 200. Например: /cells 30")
             return jsonify({'status': 'ok'})
 
         if text.startswith('/size'):
-            # Оставляем для обратной совместимости, но теперь лучше использовать /cells
+            # Оставляем для обратной совместимости
             parts = text.split()
             if len(parts) == 2:
                 try:
@@ -215,18 +246,8 @@ def webhook():
             return jsonify({'status': 'ok'})
 
         if text.startswith('/start') or text.startswith('/help'):
-            help_text = (
-                "🧶 Бот для филейного вязания\n\n"
-                "📸 Отправьте фото, и я превращу его в схему.\n"
-                "⚙️ Команды:\n"
-                "/big — большая схема (~50 ячеек по ширине)\n"
-                "/medium — средняя (~25 ячеек)\n"
-                "/small — маленькая (~15 ячеек)\n"
-                "/cells N — задать число ячеек по ширине вручную (5-200)\n"
-                "/help — эта справка\n\n"
-                "Результат: PNG схема, Excel (чёрные клетки для 1), текстовое описание."
-            )
-            send_message(chat_id, help_text)
+            help_text = "🧶 Выберите размер будущего изделия:"
+            send_menu_keyboard(chat_id, help_text)
             return jsonify({'status': 'ok'})
 
         # Если нет фото, игнорируем
